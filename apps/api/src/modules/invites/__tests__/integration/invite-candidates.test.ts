@@ -1,4 +1,5 @@
-import { describe, it, expect, beforeEach } from 'bun:test';
+import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
+import { setInviteEmailPolicy } from '#modules/invites/email-policy';
 import { authedApi, createProject, type Api } from '#tests/helpers/app';
 import { createAgent } from '#tests/helpers/agents';
 import { signUpTestUser } from '#tests/helpers/auth';
@@ -39,6 +40,10 @@ const emails = (items: { email: string }[] | null) => (items ?? []).map((one) =>
 describe('invite candidates — GET /teams/:teamId/invites/candidates', () => {
   beforeEach(async () => {
     await resetDb();
+  });
+
+  afterEach(() => {
+    setInviteEmailPolicy();
   });
 
   it('is refused while the instance has the search off, which is the default', async () => {
@@ -85,6 +90,18 @@ describe('invite candidates — GET /teams/:teamId/invites/candidates', () => {
     const res = await search(owner.api, owner.teamId, 'sam');
     expect(emails(res.data)).toEqual(['sam@elsewhere.test']);
     expect(emails((await search(owner.api, owner.teamId, 'olivia')).data)).toEqual([]);
+  });
+
+  it('leaves out the people the invite policy refuses', async () => {
+    const owner = await setupOwner();
+    for (let i = 1; i <= 9; i++) {
+      await signUpTestUser({ name: `Crowd ${i}`, email: `crowd-${i}@outside.test` });
+    }
+    await signUpTestUser({ name: 'Crowd Inside', email: 'crowd@inside.test' });
+    setInviteEmailPolicy(async (_teamId, email) => email.endsWith('@inside.test'));
+
+    const res = await search(owner.api, owner.teamId, 'crowd');
+    expect(emails(res.data)).toEqual(['crowd@inside.test']);
   });
 
   it('answers with at most 8 people', async () => {

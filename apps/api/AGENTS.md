@@ -181,6 +181,7 @@ Enforced declaratively through macros, never imperative calls in handlers.
   (`invites/email-policy.ts`, 400 `EMAIL_DOMAIN_NOT_ALLOWED`): by default, one with an
   account always and one without only if it could register. A build that lets a
   workspace keep domains of its own calls `setInviteEmailPolicy` with a check against them.
+  The invite dialog's suggestions (`.../invites/candidates`) leave out whom it refuses.
   `members/` removes (last owner protected).
 - The member list of a project is governed by its role matrix **or** by the team that
   owns it: `memberAdmin: ["members_manage", "<action>"]` passes an owner or manager of

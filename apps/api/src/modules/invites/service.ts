@@ -351,14 +351,18 @@ export async function listTeamInvites(teamId: number, issuerId: string): Promise
 }
 
 const INVITE_CANDIDATE_LIMIT = 8;
+// The matches read to find them, since the invite policy may refuse some: a search whose
+// first matches it mostly refuses suggests fewer.
+const INVITE_CANDIDATE_SCAN = 40;
 
-// The whole instance is searched: an invitee is not in the team yet.
+// The whole instance is searched: an invitee is not in the team yet. Only people the team
+// would take an invite for are suggested.
 export async function listInviteCandidates(teamId: number, search: string) {
   if (!(await getAuthSettings()).inviteSearch) {
     throw new HttpError(403, 'Searching people is turned off on this instance');
   }
   const pattern = likePattern(search);
-  return db
+  const matches = await db
     .select({ userId: user.id, name: user.name, email: user.email, image: user.image })
     .from(user)
     .where(
@@ -379,7 +383,13 @@ export async function listInviteCandidates(teamId: number, search: string) {
       ),
     )
     .orderBy(asc(user.name), asc(user.email))
-    .limit(INVITE_CANDIDATE_LIMIT);
+    .limit(INVITE_CANDIDATE_SCAN);
+  const candidates: typeof matches = [];
+  for (const match of matches) {
+    if (candidates.length === INVITE_CANDIDATE_LIMIT) break;
+    if (await isInviteEmailAllowed(teamId, match.email, true)) candidates.push(match);
+  }
+  return candidates;
 }
 
 // Removes an invite of the given project. Returns true when one existed. Used to
