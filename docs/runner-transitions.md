@@ -1,6 +1,6 @@
 # Conditional issue transitions
 
-A custom runner controller can call `POST /api/issues/{issueId}/transition` with its
+A custom runner controller can call `POST /issues/{issueId}/transition` with its
 agent API key and the usual work-item edit permission:
 
 ```json
