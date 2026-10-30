@@ -1,5 +1,7 @@
 import {
   db,
+  agentRun,
+  aiAgent,
   project as projectTable,
   issue,
   issueStatus,
@@ -1136,10 +1138,23 @@ export async function updateIssue(
   id: number,
   patch: IssuePatch,
   actor?: ActivityActor,
-  opts?: { onlyIfColumnId?: number; skipIfColumnFull?: boolean },
+  opts?: {
+    onlyIfColumnId?: number;
+    skipIfColumnFull?: boolean;
+    transition?: {
+      expectedColumnId: number;
+      runId: number;
+      attempt: number;
+      phase: 'worker' | 'review';
+      actorUserId: string;
+      projectId: number;
+    };
+  },
 ): Promise<IssueRow | null> {
   const before = await loadSnapshot(id);
   if (!before) return null;
+  if (opts?.transition && before.projectId !== opts.transition.projectId)
+    throw new HttpError(404, 'Issue not found');
 
   // Each date is checked against the effective other one: a patch sets one date
   // and leaves the stored value of the other in force.
@@ -1195,10 +1210,87 @@ export async function updateIssue(
       opts?.onlyIfColumnId == null
         ? eq(issue.id, id)
         : and(eq(issue.id, id), eq(issue.columnId, opts.onlyIfColumnId));
-    const updated = await db.update(issue).set(set).where(guard).returning({ id: issue.id });
-    if (updated.length === 0) return getIssue(id);
+    const updated = opts?.transition
+      ? await db.transaction(async (tx) => {
+          const fence = opts.transition!;
+          const [current] = await tx
+            .select()
+            .from(issue)
+            .where(and(eq(issue.id, id), eq(issue.projectId, before.projectId)))
+            .for('update');
+          if (!current) throw new HttpError(404, 'Issue not found');
+          const [run] = await tx
+            .select()
+            .from(agentRun)
+            .where(eq(agentRun.id, fence.runId))
+            .for('update');
+          const [owner] = run
+            ? await tx
+                .select({ userId: aiAgent.userId })
+                .from(aiAgent)
+                .where(eq(aiAgent.id, run.agentId))
+            : [];
+          if (
+            !run ||
+            owner?.userId !== fence.actorUserId ||
+            run.issueId !== id ||
+            run.projectId !== current.projectId ||
+            run.attempts !== fence.attempt
+          )
+            throw new HttpError(404, 'Current runner attempt not found');
+          const [newer] = await tx
+            .select({ id: agentRun.id })
+            .from(agentRun)
+            .where(and(eq(agentRun.issueId, id), sql`${agentRun.id} > ${run.id}`))
+            .limit(1);
+          if (newer) throw new HttpError(409, 'A newer issue run superseded this result');
+          if (fence.phase === 'worker') {
+            const [lease] = await tx
+              .select({ live: sql<boolean>`${agentRun.nextAttemptAt} > clock_timestamp()` })
+              .from(agentRun)
+              .where(eq(agentRun.id, run.id));
+            if (run.status !== 'pending' || !run.executionStartedAt || !lease?.live)
+              throw new HttpError(404, 'Current runner attempt not found');
+          } else if (run.status !== 'success') {
+            throw new HttpError(409, 'Review requires a successful terminal run');
+          }
+          // Validate the run even for a lost-response retry which finds the target already applied.
+          if (current.columnId === patch.columnId) return [];
+          if (current.columnId !== fence.expectedColumnId)
+            throw new HttpError(409, 'Issue column changed');
+          const liveLease =
+            fence.phase === 'worker'
+              ? exists(
+                  tx
+                    .select({ id: agentRun.id })
+                    .from(agentRun)
+                    .where(
+                      and(
+                        eq(agentRun.id, run.id),
+                        sql`${agentRun.nextAttemptAt} > clock_timestamp()`,
+                      ),
+                    ),
+                )
+              : undefined;
+          const moved = await tx
+            .update(issue)
+            .set(set)
+            .where(and(guard, eq(issue.columnId, fence.expectedColumnId), liveLease))
+            .returning({ id: issue.id });
+          if (moved.length === 0) throw new HttpError(404, 'Current runner attempt not found');
+          return moved;
+        })
+      : await db.update(issue).set(set).where(guard).returning({ id: issue.id });
+    if (updated.length === 0) {
+      const unchanged = await getIssue(id);
+      if (opts?.transition && unchanged?.projectId !== opts.transition.projectId)
+        throw new HttpError(404, 'Issue not found');
+      return unchanged;
+    }
   }
   const after = await getIssue(id);
+  if (opts?.transition && after?.projectId !== opts.transition.projectId)
+    throw new HttpError(404, 'Issue not found');
   if (after) {
     const afterSnapshot = snapshot(after);
     if (before.columnId !== afterSnapshot.columnId)
