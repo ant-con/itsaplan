@@ -56,3 +56,34 @@ export const ExternalTraceResponse = t.Nullable(
     events: t.Array(t.Object({ event: AgUiEvent, receivedAt: t.String() })),
   }),
 );
+
+export const planChildBody = t.Object({
+  attempt: t.Integer({ minimum: 1 }),
+  operationId: t.String({ pattern: '^[a-f0-9]{64}$' }),
+  expectedParentColumnId: t.Integer({ minimum: 1 }),
+  columnId: t.Integer({ minimum: 1 }),
+  title: t.String({ minLength: 1, maxLength: 200 }),
+  specification: t.String({ minLength: 1, maxLength: 7000 }),
+  acceptanceCriteria: t.Array(t.String({ minLength: 1, maxLength: 500 }), {
+    minItems: 1,
+    maxItems: 8,
+  }),
+  role: t.Union([
+    t.Literal('research'),
+    t.Literal('experiment'),
+    t.Literal('evaluation'),
+    t.Literal('synthesis'),
+  ]),
+  budgetSeconds: t.Integer({ minimum: 1, maximum: 600 }),
+  comparisonTarget: t.Optional(t.String({ minLength: 1, maxLength: 80 })),
+});
+export const PlanChildResponse = t.Object({
+  issueId: t.Number(),
+  runId: t.Number(),
+  identifier: t.String(),
+});
+export const planChildParams = t.Object({
+  runId: t.Numeric({ minimum: 1 }),
+  operationId: t.String({ pattern: '^[a-f0-9]{64}$' }),
+});
+export const childClaimBody = t.Object({ attempt: t.Integer({ minimum: 1 }) });

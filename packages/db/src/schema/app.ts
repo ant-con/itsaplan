@@ -2528,3 +2528,24 @@ export const documentComment = pgTable(
   },
   (t) => [index('document_comment_document_idx').on(t.documentId, t.createdAt)],
 );
+
+// Retained operation receipts prevent a runner retry from duplicating a planned child.
+export const runnerPlanChild = pgTable(
+  'runner_plan_child',
+  {
+    parentIssueId: integer('parent_issue_id')
+      .notNull()
+      .references(() => issue.id, { onDelete: 'cascade' }),
+    operationId: text('operation_id').notNull(),
+    parentRunId: integer('parent_run_id').references(() => agentRun.id, { onDelete: 'set null' }),
+    agentId: integer('agent_id').references(() => aiAgent.id, { onDelete: 'set null' }),
+    inputHash: text('input_hash').notNull(),
+    budgetSeconds: integer('budget_seconds').notNull(),
+    childIssueId: integer('child_issue_id').references(() => issue.id, { onDelete: 'set null' }),
+    childRunId: integer('child_run_id').references(() => agentRun.id, { onDelete: 'set null' }),
+  },
+  (t) => [
+    primaryKey({ columns: [t.parentIssueId, t.operationId] }),
+    check('runner_plan_child_budget_check', sql`${t.budgetSeconds} BETWEEN 1 AND 600`),
+  ],
+);

@@ -168,7 +168,11 @@ export async function claimRunnerRun(agent: RunnerAgent): Promise<RunnerRun | nu
 
 // Claims the agent's next due run, or null when it has none. FOR UPDATE SKIP LOCKED
 // keeps two claims on the same agent from taking the same run.
-export async function takeNextRun(agent: RunnerAgent): Promise<RunnerRun | null> {
+export async function takeNextRun(
+  agent: RunnerAgent,
+  onlyRunId?: number,
+  parentFence?: { runId: number; attempt: number },
+): Promise<RunnerRun | null> {
   const agentId = agent.id;
   await expireExhaustedRuns(agent);
   const rows = await db.execute(sql`
@@ -181,6 +185,18 @@ export async function takeNextRun(agent: RunnerAgent): Promise<RunnerRun | null>
       SELECT id FROM agent_run q
       WHERE q.agent_id = ${agentId} AND q.status = 'pending' AND q.next_attempt_at <= now()
         AND ${runTurn}
+        AND ${onlyRunId === undefined ? sql`true` : sql`q.id = ${onlyRunId}`}
+        AND ${
+          parentFence
+            ? sql`EXISTS (SELECT 1 FROM agent_run parent
+          JOIN issue child ON child.id = q.issue_id
+          WHERE parent.id = ${parentFence.runId} AND parent.agent_id = q.agent_id
+            AND parent.project_id = q.project_id AND child.parent_id = parent.issue_id
+            AND parent.attempts = ${parentFence.attempt} AND parent.status = 'pending'
+            AND parent.execution_started_at IS NOT NULL AND parent.next_attempt_at > clock_timestamp()
+            AND NOT EXISTS (SELECT 1 FROM agent_run newer WHERE newer.issue_id = parent.issue_id AND newer.id > parent.id))`
+            : sql`true`
+        }
       ORDER BY q.next_attempt_at, q.id
       FOR UPDATE SKIP LOCKED
       LIMIT 1
