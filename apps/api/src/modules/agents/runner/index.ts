@@ -12,6 +12,22 @@ import {
   RunEventsAck,
 } from './model';
 import { claimRunnerRun, finishRun, heartbeatRun } from './service';
+import { entityGuard } from '#shared/guards';
+import { assertPermission } from '#shared/access';
+import {
+  createPlanChild,
+  claimPlanChild,
+  cancelPlanChild,
+  runnerRunProject,
+} from './plan-children';
+import {
+  planChildBody,
+  PlanChildResponse,
+  planChildParams,
+  childClaimBody,
+  ChildClaimResponse,
+  ChildCancelResponse,
+} from './model';
 import { appendRunEvents } from './run-events';
 
 // The queue an external agent's runner drains, authenticated with the agent's own
@@ -21,6 +37,60 @@ export const agentRunnerRoutes = new Elysia({
   detail: { tags: ['Agent Runner'] },
 })
   .use(runnerAuth)
+  .macro({
+    planParent: entityGuard(
+      'work_items',
+      'Parent run not found',
+      (p) => runnerRunProject(Number(p.runId)),
+      'subtasks',
+    ),
+  })
+  .post(
+    '/agent-runs/:runId/children',
+    ({ agent, params, body }) => createPlanChild(agent, params.runId, body),
+    {
+      runnerAgent: true,
+      planParent: 'create',
+      params: runParams,
+      body: planChildBody,
+      beforeHandle: async ({ projectId, agent }) => {
+        await assertPermission(projectId, { id: agent.userId }, 'work_items', 'edit');
+      },
+      response: { 200: PlanChildResponse, ...commonErrors, ...errors(409) },
+      detail: { summary: 'Create and queue an idempotent planned child' },
+    },
+  )
+  .post(
+    '/agent-runs/:runId/children/:operationId/claim',
+    ({ agent, params, body }) =>
+      claimPlanChild(agent, params.runId, params.operationId, body.attempt),
+    {
+      runnerAgent: true,
+      planParent: 'edit',
+      params: planChildParams,
+      body: childClaimBody,
+      response: { 200: ChildClaimResponse, ...commonErrors, ...errors(409) },
+      detail: {
+        summary: 'Claim only the mapped child of a live parent attempt',
+        description:
+          'A retry by the same parent attempt returns the run it already claimed. ' +
+          'run: null with retryLater: true when the child run is not due yet. 409 when it ended.',
+      },
+    },
+  )
+  .post(
+    '/agent-runs/:runId/children/:operationId/cancel',
+    ({ agent, params, body }) =>
+      cancelPlanChild(agent, params.runId, params.operationId, body.attempt),
+    {
+      runnerAgent: true,
+      planParent: 'edit',
+      params: planChildParams,
+      body: childClaimBody,
+      response: { 200: ChildCancelResponse, ...commonErrors },
+      detail: { summary: 'Cancel the mapped child run of a live parent attempt' },
+    },
+  )
 
   .post('/agent-runs/claim', async ({ agent }) => ({ run: await claimRunnerRun(agent) }), {
     runnerAgent: true,
