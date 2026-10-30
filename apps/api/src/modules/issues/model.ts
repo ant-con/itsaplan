@@ -772,3 +772,11 @@ export const IssueAgentRunTraceResponse = t.Nullable(
     previousTraceId: t.Nullable(t.String()),
   }),
 );
+
+export const issueTransitionBody = t.Object({
+  columnId: t.Integer({ minimum: 1, maximum: 2147483647 }),
+  expectedColumnId: t.Integer({ minimum: 1, maximum: 2147483647 }),
+  runId: t.Integer({ minimum: 1, maximum: 2147483647 }),
+  attempt: t.Integer({ minimum: 1, maximum: 2147483647 }),
+  phase: t.Union([t.Literal('worker'), t.Literal('review')]),
+});

@@ -18,6 +18,9 @@ The instance can also send the tasks to an endpoint that you run. See
 
 Enable MCP for the project first, in Settings, MCP Server. It is off by default.
 
+Custom runner controllers can use [conditional issue transitions](runner-transitions.md)
+to move a ticket without overwriting an intervening board edit.
+
 ## Claude Code
 
 Claude Code reads `.mcp.json` from the working directory:

@@ -145,6 +145,7 @@ import {
   listIssuesQuery,
   issueSequenceParams,
   updateIssueBody,
+  issueTransitionBody,
   subtaskDispositionQuery,
   setIssueFieldValueBody,
   issueFieldParams,
@@ -665,6 +666,31 @@ export const issueRoutes = new Elysia({ name: 'issues', detail: { tags: ['Issues
           'Update an issue by its numeric id. Moving it into a column that is at a ' +
           'hard WIP limit fails with 409 (code wip_limit_exceeded).',
         ...mcpTool('update_issue'),
+      },
+    },
+  )
+
+  .post(
+    '/issues/:issueId/transition',
+    async ({ params, body, user, projectId }) => {
+      const result = await updateIssue(
+        params.issueId,
+        { columnId: body.columnId },
+        requireUser(user).id,
+        { transition: { ...body, actorUserId: requireUser(user).id, projectId } },
+      );
+      if (!result) throw new HttpError(404, 'Issue not found');
+      return result;
+    },
+    {
+      body: issueTransitionBody,
+      params: issueParams,
+      workItem: 'edit',
+      response: { 200: IssueResponse, ...commonErrors, ...errors(409) },
+      detail: {
+        summary: 'Conditionally transition a runner issue',
+        description:
+          'Checks column, owning run and attempt under database locks. Worker transitions require a live execution lease; review transitions require the latest successful run.',
       },
     },
   )
