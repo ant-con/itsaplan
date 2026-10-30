@@ -87,3 +87,10 @@ export const planChildParams = t.Object({
   operationId: t.String({ pattern: '^[a-f0-9]{64}$' }),
 });
 export const childClaimBody = t.Object({ attempt: t.Integer({ minimum: 1 }) });
+export const ChildClaimResponse = t.Object({
+  run: t.Nullable(RunnerRunResponse),
+  retryLater: t.Boolean(),
+});
+export const ChildCancelResponse = t.Object({
+  status: t.Union([t.Literal('canceled'), t.Literal('finished'), t.Literal('none')]),
+});

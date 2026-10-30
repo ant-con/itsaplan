@@ -166,42 +166,7 @@ export async function claimRunnerRun(agent: RunnerAgent): Promise<RunnerRun | nu
   return takeNextRun(agent);
 }
 
-// Claims the agent's next due run, or null when it has none. FOR UPDATE SKIP LOCKED
-// keeps two claims on the same agent from taking the same run.
-export async function takeNextRun(
-  agent: RunnerAgent,
-  onlyRunId?: number,
-  parentFence?: { runId: number; attempt: number },
-): Promise<RunnerRun | null> {
-  const agentId = agent.id;
-  await expireExhaustedRuns(agent);
-  const rows = await db.execute(sql`
-    UPDATE agent_run r
-    SET attempts = r.attempts + 1,
-        started_at = coalesce(r.started_at, now()),
-        execution_started_at = NULL,
-        next_attempt_at = now() + make_interval(secs => ${agentRunConfig.leaseSeconds()})
-    WHERE r.id = (
-      SELECT id FROM agent_run q
-      WHERE q.agent_id = ${agentId} AND q.status = 'pending' AND q.next_attempt_at <= now()
-        AND ${runTurn}
-        AND ${onlyRunId === undefined ? sql`true` : sql`q.id = ${onlyRunId}`}
-        AND ${
-          parentFence
-            ? sql`EXISTS (SELECT 1 FROM agent_run parent
-          JOIN issue child ON child.id = q.issue_id
-          WHERE parent.id = ${parentFence.runId} AND parent.agent_id = q.agent_id
-            AND parent.project_id = q.project_id AND child.parent_id = parent.issue_id
-            AND parent.attempts = ${parentFence.attempt} AND parent.status = 'pending'
-            AND parent.execution_started_at IS NOT NULL AND parent.next_attempt_at > clock_timestamp()
-            AND NOT EXISTS (SELECT 1 FROM agent_run newer WHERE newer.issue_id = parent.issue_id AND newer.id > parent.id))`
-            : sql`true`
-        }
-      ORDER BY q.next_attempt_at, q.id
-      FOR UPDATE SKIP LOCKED
-      LIMIT 1
-    )
-    RETURNING
+const claimedColumns = sql.raw(`
       r.id,
       r.trigger,
       r.prompt,
@@ -230,6 +195,49 @@ export async function takeNextRun(
          FROM issue_activity a JOIN "user" u ON u.id = a.actor_user_id
          LEFT JOIN ai_agent ag ON ag.user_id = u.id
          WHERE a.id = r.source_activity_id) AS "requesterUsername"
+`);
+
+// Claims the agent's next due run, or null when it has none. FOR UPDATE SKIP LOCKED
+// keeps two claims on the same agent from taking the same run. The general claim skips
+// planned child runs: only their parent's child claim may take them.
+export async function takeNextRun(
+  agent: RunnerAgent,
+  onlyRunId?: number,
+  parentFence?: { runId: number; attempt: number },
+): Promise<RunnerRun | null> {
+  const agentId = agent.id;
+  await expireExhaustedRuns(agent);
+  const rows = await db.execute(sql`
+    UPDATE agent_run r
+    SET attempts = r.attempts + 1,
+        started_at = coalesce(r.started_at, now()),
+        execution_started_at = NULL,
+        next_attempt_at = now() + make_interval(secs => ${agentRunConfig.leaseSeconds()})
+    WHERE r.id = (
+      SELECT id FROM agent_run q
+      WHERE q.agent_id = ${agentId} AND q.status = 'pending' AND q.next_attempt_at <= now()
+        AND ${runTurn}
+        AND ${
+          onlyRunId === undefined
+            ? sql`NOT EXISTS (SELECT 1 FROM runner_plan_child pc WHERE pc.child_run_id = q.id)`
+            : sql`q.id = ${onlyRunId}`
+        }
+        AND ${
+          parentFence
+            ? sql`EXISTS (SELECT 1 FROM agent_run parent
+          JOIN issue child ON child.id = q.issue_id
+          WHERE parent.id = ${parentFence.runId} AND parent.agent_id = q.agent_id
+            AND parent.project_id = q.project_id AND child.parent_id = parent.issue_id
+            AND parent.attempts = ${parentFence.attempt} AND parent.status = 'pending'
+            AND parent.execution_started_at IS NOT NULL AND parent.next_attempt_at > clock_timestamp()
+            AND NOT EXISTS (SELECT 1 FROM agent_run newer WHERE newer.issue_id = parent.issue_id AND newer.id > parent.id))`
+            : sql`true`
+        }
+      ORDER BY q.next_attempt_at, q.id
+      FOR UPDATE SKIP LOCKED
+      LIMIT 1
+    )
+    RETURNING ${claimedColumns}
   `);
   const row = (rows as unknown as ClaimedRow[])[0];
   if (!row) return null;
@@ -238,12 +246,7 @@ export async function takeNextRun(
     await deferRun(row.id, wait);
     return null;
   }
-  const forPrompt = {
-    ...row,
-    agentUserId: agent.userId,
-    agentUsername: agent.username,
-    ...(await loadRunThread(row)),
-  };
+  const forPrompt = await promptInput(agent, row);
   // A start that fails is a failed attempt: the run comes back after the retry delay,
   // with the error on it, rather than being handed out half started.
   try {
@@ -253,7 +256,36 @@ export async function takeNextRun(
     await scheduleRunRetry(row.id, runRetryDelayMs(row.attempts), message);
     return null;
   }
-  const result = {
+  const result = frameRun(agent, row, forPrompt);
+  if (!(await markRunExecuting(row.id, row.attempts))) return null;
+  return result;
+}
+
+// The run as a claim handed it out, read again without changing it, so a claim whose
+// response was lost can be answered with the same run and attempt.
+export async function readClaimedRun(agent: RunnerAgent, runId: number): Promise<RunnerRun | null> {
+  const rows = await db.execute(
+    sql`SELECT ${claimedColumns} FROM agent_run r WHERE r.id = ${runId}`,
+  );
+  const row = (rows as unknown as ClaimedRow[])[0];
+  return row ? frameRun(agent, row, await promptInput(agent, row)) : null;
+}
+
+async function promptInput(agent: RunnerAgent, row: ClaimedRow) {
+  return {
+    ...row,
+    agentUserId: agent.userId,
+    agentUsername: agent.username,
+    ...(await loadRunThread(row)),
+  };
+}
+
+function frameRun(
+  agent: RunnerAgent,
+  row: ClaimedRow,
+  forPrompt: Awaited<ReturnType<typeof promptInput>>,
+): RunnerRun {
+  return {
     traceEvents: true,
     id: row.id,
     trigger: row.trigger,
@@ -267,8 +299,6 @@ export async function takeNextRun(
     issueId: row.issueId,
     issueIdentifier: row.issueIdentifier,
   };
-  if (!(await markRunExecuting(row.id, row.attempts))) return null;
-  return result;
 }
 
 // What the agent is told about the run before the task itself: the project the run

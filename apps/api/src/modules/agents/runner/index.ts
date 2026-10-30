@@ -14,8 +14,20 @@ import {
 import { claimRunnerRun, finishRun, heartbeatRun } from './service';
 import { entityGuard } from '#shared/guards';
 import { assertPermission } from '#shared/access';
-import { createPlanChild, claimPlanChild, runnerRunProject } from './plan-children';
-import { planChildBody, PlanChildResponse, planChildParams, childClaimBody } from './model';
+import {
+  createPlanChild,
+  claimPlanChild,
+  cancelPlanChild,
+  runnerRunProject,
+} from './plan-children';
+import {
+  planChildBody,
+  PlanChildResponse,
+  planChildParams,
+  childClaimBody,
+  ChildClaimResponse,
+  ChildCancelResponse,
+} from './model';
 import { appendRunEvents } from './run-events';
 
 // The queue an external agent's runner drains, authenticated with the agent's own
@@ -50,16 +62,33 @@ export const agentRunnerRoutes = new Elysia({
   )
   .post(
     '/agent-runs/:runId/children/:operationId/claim',
-    async ({ agent, params, body }) => ({
-      run: await claimPlanChild(agent, params.runId, params.operationId, body.attempt),
-    }),
+    ({ agent, params, body }) =>
+      claimPlanChild(agent, params.runId, params.operationId, body.attempt),
     {
       runnerAgent: true,
       planParent: 'edit',
       params: planChildParams,
       body: childClaimBody,
-      response: { 200: ClaimResponse, ...commonErrors, ...errors(409) },
-      detail: { summary: 'Claim only the mapped child of a live parent attempt' },
+      response: { 200: ChildClaimResponse, ...commonErrors, ...errors(409) },
+      detail: {
+        summary: 'Claim only the mapped child of a live parent attempt',
+        description:
+          'A retry by the same parent attempt returns the run it already claimed. ' +
+          'run: null with retryLater: true when the child run is not due yet. 409 when it ended.',
+      },
+    },
+  )
+  .post(
+    '/agent-runs/:runId/children/:operationId/cancel',
+    ({ agent, params, body }) =>
+      cancelPlanChild(agent, params.runId, params.operationId, body.attempt),
+    {
+      runnerAgent: true,
+      planParent: 'edit',
+      params: planChildParams,
+      body: childClaimBody,
+      response: { 200: ChildCancelResponse, ...commonErrors },
+      detail: { summary: 'Cancel the mapped child run of a live parent attempt' },
     },
   )
 

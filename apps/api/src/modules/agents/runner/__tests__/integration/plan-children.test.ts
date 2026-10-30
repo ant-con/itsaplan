@@ -118,7 +118,106 @@ describe('runner planned children', () => {
     expect((await route.post(body)).status).toBe(409);
     expect(await db.select().from(runnerPlanChild)).toHaveLength(1);
   });
-  it('caps parent-wide count across requests', async () => {
+  it('never hands a planned child run to the general claim', async () => {
+    const { runner, route, body } = await setup();
+    expect((await route.post(body)).status).toBe(200);
+    expect((await runner['agent-runs'].claim.post()).data!.run).toBeNull();
+  });
+  it('answers a retried claim from the same parent attempt with the same run', async () => {
+    const { runner, run, route, body } = await setup();
+    const child = (await route.post(body)).data!;
+    const claim = () =>
+      runner['agent-runs']({ runId: run.id })
+        .children({ operationId: body.operationId })
+        .claim.post({ attempt: run.attempts });
+    const first = (await claim()).data!;
+    const retried = (await claim()).data!;
+    expect(first.run!.id).toBe(child.runId);
+    expect(retried).toEqual(first);
+    expect(retried.retryLater).toBe(false);
+    const [row] = await db.select().from(agentRun).where(eq(agentRun.id, child.runId));
+    expect(row.attempts).toBe(1);
+  });
+  it('asks a claim to retry later while the child run is not due, then takes it', async () => {
+    const { runner, run, route, body } = await setup();
+    const child = (await route.post(body)).data!;
+    const claim = () =>
+      runner['agent-runs']({ runId: run.id })
+        .children({ operationId: body.operationId })
+        .claim.post({ attempt: run.attempts });
+    await db
+      .update(agentRun)
+      .set({ nextAttemptAt: sql`now() + interval '1 hour'` })
+      .where(eq(agentRun.id, child.runId));
+    expect((await claim()).data).toEqual({ run: null, retryLater: true });
+    await db
+      .update(agentRun)
+      .set({ nextAttemptAt: sql`now() - interval '1 second'` })
+      .where(eq(agentRun.id, child.runId));
+    expect((await claim()).data!.run!.id).toBe(child.runId);
+  });
+  it('makes another parent attempt wait for the child lease, then re-serves the child', async () => {
+    const { runner, run, route, body } = await setup();
+    const child = (await route.post(body)).data!;
+    const childRoute = runner['agent-runs']({ runId: run.id }).children({
+      operationId: body.operationId,
+    });
+    expect((await childRoute.claim.post({ attempt: 1 })).data!.run!.attempts).toBe(1);
+    // The parent lease expires and the parent is claimed again as attempt 2.
+    await db
+      .update(agentRun)
+      .set({ nextAttemptAt: sql`now() - interval '1 second'` })
+      .where(eq(agentRun.id, run.id));
+    expect((await runner['agent-runs'].claim.post()).data!.run!.attempts).toBe(2);
+    expect((await childRoute.claim.post({ attempt: 2 })).data).toEqual({
+      run: null,
+      retryLater: true,
+    });
+    await db
+      .update(agentRun)
+      .set({ nextAttemptAt: sql`now() - interval '1 second'` })
+      .where(eq(agentRun.id, child.runId));
+    const reclaimed = (await childRoute.claim.post({ attempt: 2 })).data!;
+    expect(reclaimed.run!.attempts).toBe(2);
+    expect((await childRoute.claim.post({ attempt: 2 })).data).toEqual(reclaimed);
+  });
+  it('cancels the mapped child run idempotently and only for the live parent attempt', async () => {
+    const { runner, run, route, body } = await setup();
+    const child = (await route.post(body)).data!;
+    const childRoute = runner['agent-runs']({ runId: run.id }).children({
+      operationId: body.operationId,
+    });
+    expect((await childRoute.cancel.post({ attempt: 2 })).status).toBe(404);
+    expect((await childRoute.cancel.post({ attempt: 1 })).data).toEqual({ status: 'canceled' });
+    expect((await childRoute.cancel.post({ attempt: 1 })).data).toEqual({ status: 'finished' });
+    const [row] = await db.select().from(agentRun).where(eq(agentRun.id, child.runId));
+    expect(row.status).toBe('canceled');
+    expect((await childRoute.claim.post({ attempt: 1 })).status).toBe(409);
+    expect(
+      (
+        await runner['agent-runs']({ runId: run.id })
+          .children({ operationId: 'e'.repeat(64) })
+          .cancel.post({ attempt: 1 })
+      ).data,
+    ).toEqual({ status: 'none' });
+  });
+  it('counts the caps per parent run, so a new run of the same parent gets its own', async () => {
+    const { owner, runner, route, body, run, parent } = await setup();
+    for (let i = 0; i < 6; i++)
+      expect((await route.post({ ...body, operationId: i.toString().repeat(64) })).status).toBe(
+        200,
+      );
+    await runner['agent-runs']({ runId: run.id }).result.post({ attempt: 1, status: 'failed' });
+    await owner.issues({ issueId: parent.id }).comments.post({ body: '@planner resume' });
+    const next = (await runner['agent-runs'].claim.post()).data!.run!;
+    expect(next.issueId).toBe(parent.id);
+    const nextRoute = runner['agent-runs']({ runId: next.id }).children;
+    expect(
+      (await nextRoute.post({ ...body, attempt: next.attempts, operationId: '7'.repeat(64) }))
+        .status,
+    ).toBe(200);
+  });
+  it('caps the count per parent run across requests', async () => {
     const { route, body } = await setup();
     for (let i = 0; i < 6; i++)
       expect((await route.post({ ...body, operationId: i.toString().repeat(64) })).status).toBe(
